@@ -113,6 +113,7 @@ typedef struct {
     int inodeNo;        /* the file i-node number */
     short type;         /* the file i-node type, DIRECTORY, FILE_TYPE (there's another value FREE_INODE which never appears here */
     char links;         /* number of links to the i-node */
+    char descriptor_count; //how many file descriptors points to it
     int size;           /* file size in bytes */
     int numBlocks;      /* number of blocks used by the file */
 } fileStat;
