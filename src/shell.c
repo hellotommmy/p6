@@ -312,6 +312,8 @@ static void shell_stat( void) {
 	writeStr( "    Size             : "); writeStr( s); writeChar( RETURN);
 	itoa( status.numBlocks, s);
 	writeStr( "    Blocks allocated : "); writeStr( s); writeChar( RETURN);
+    itoa( status.descriptor_count, s);
+    writeStr( "	   descriptor count : "); writeStr( s); writeChar( RETURN);
     } else
 	writeStr( "Stat failed\n");
 }

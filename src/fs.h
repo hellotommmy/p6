@@ -6,8 +6,8 @@
 
 //number of sectors 
 #define FS_SIZE 2048
-#define N_INDIRECT_BLOCK 4
-#define N_DIRECT_BLOCK 10
+#define N_INDIRECT_BLOCK 3
+#define N_DIRECT_BLOCK 9
 #define SUPER_BLOCK_SIZE sizeof(sb_t)
 #define INODE_SIZE sizeof(inode_t)
 typedef struct {
@@ -26,11 +26,13 @@ typedef struct {
 	int data_addr;
 
 } sb_t;
-typedef struct {
-	int type;
-	int link_count;
+typedef struct {//4+4+4+48+4 = 64
+	char type;
+	unsigned char link_count;
 
-	int descriptor_count;
+	unsigned char descriptor_count;
+	char padding;
+
 	int file_size;//in bytes
 	int n_blocks;
 	
@@ -54,6 +56,7 @@ typedef struct
 {
 	int inode;
 	char name[MAX_FILE_NAME];
+	char paddings[64-sizeof(int)-MAX_FILE_NAME];
 } dir_t;
 void fs_init( void);
 int fs_mkfs( void);
