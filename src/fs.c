@@ -16,12 +16,20 @@
 #define SUPER_LOC 0
 #define SUPER_COPY_LOC FS_SIZE - 1
 #define MAX_INODES 256
+#define MAX_FILE_SIZE (N_INDIRECT_BLOCK*POINTERS_PER_BLOCK+N_DIRECT_BLOCK)
+
+
+#define FS_SIZE_IN_BYTES (FS_SIZE*SECTOR_SIZE)//2048*512
+#define NUM_OF_BLOCKS (FS_SIZE_IN_BYTES/BLOCK_SIZE)
+
 
 int work_dir;
 #define ROOT_INODE_N 0
-#define MAX_FD_NUM 64
+#define MAX_FD_NUM 128
 #define OK 1
 #define ENTRIES_PER_BLOCK (BLOCK_SIZE/sizeof(dir_t))
+#define POINTERS_PER_BLOCK (BLOCK_SIZE/sizeof(int))
+
 sb_t * superblock;
 char sb_buffer[BLOCK_SIZE];
 
@@ -66,23 +74,31 @@ void bitmap_init(sb_t* sb){
 	char temp[BLOCK_SIZE];
 	int i;
 	bzero_block(temp);
+	
 	if(sb->data_addr<=BLOCK_SIZE-1){
-		temp[BLOCK_SIZE-1] = 1;     //mark the last block to be busy
+		temp[BLOCK_SIZE - 1] = 1;     //mark the last block to be busy
 		block_write(sb->bitmap_addr+sb->n_bitmap_blocks-1,temp);//because it is used to keep copy of superblock
 
-		temp[BLOCK_SIZE-1] = 0;
+		temp[BLOCK_SIZE - 1] = 0;
 		for(i=0;i<sb->data_addr;i++)
 			temp[i] = 1;
 		block_write(sb->bitmap_addr,temp);
 	}
 	else{
-		//print_str(0, 0, "waiting to be completed ");
+		printf("waiting to be completed\n");
 	}
+
 }
 //allocate the bitmap block given the date block number
 int bitmap_block(int data_block_index){
+/*	int plus_off;
+	plus_off = (data_block_index / BLOCK_SIZE);
+	if(plus_off<0 ||data_block_index > 2046){
+		printf("data_block_index error:%d\n",data_block_index );
+		return ERROR;
+	}*/
 	return superblock->bitmap_addr + 
-	(data_block_index / BLOCK_SIZE);
+	((data_block_index )/ BLOCK_SIZE);
 }
 
 char * map_read(int data_block_index,char *buffer){
@@ -125,6 +141,7 @@ void sb_init(sb_t *sb) {
 //----------------------------------------------------------------------------------------
 //START of data blocks
 void data_read(int block_number, char *block_buffer) {
+	//printf("%d\n",superblock->data_addr + block_number  );
 	block_read(superblock->data_addr + block_number, block_buffer);
 }
 int balloc(){
@@ -182,30 +199,69 @@ int insert_entry_into_dir(int source_inode_number,int dest_inode_number,char *fi
 	current_entries = directory_inode->file_size / sizeof(dir_t);
 
 	/* if too many entries in this directory */
-	if(current_entries >= N_DIRECT_BLOCK * ENTRIES_PER_BLOCK){
-//		printf("too many entries, waiting to be completed\n");
-		return ERROR;
-	}
 	int which_block;//which block
 	int which_entry;//in a block
 	which_block = current_entries / ENTRIES_PER_BLOCK;
 	which_entry = current_entries % ENTRIES_PER_BLOCK;   
-
+	if(which_block >= N_DIRECT_BLOCK + N_INDIRECT_BLOCK*POINTERS_PER_BLOCK){
+		//printf("too many entries, waiting to be completed\n");
+		return ERROR;
+	}
 	if(which_block >= directory_inode->n_blocks){
 		int new_block;
 		new_block = balloc();
 		//ERROR_MSG(("%d\n",new_block))
 		if(new_block == ERROR){
-			ASSERT(0);
+			//ASSERT(0);
 			return ERROR;
 		}
-		directory_inode->dir_blk_addr[which_block] = new_block;
+		if(which_block < N_DIRECT_BLOCK){
+			directory_inode->dir_blk_addr[which_block] = new_block;
+		}
+		else{
+			int j;
+			int indirect_block;
+			int indirect_index;
+			int *po;
+			char pointer_buffer[BLOCK_SIZE];
+			indirect_block = (which_block - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+			indirect_index = (which_block - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
+			if(indirect_index == 0){
+				//use j as  an indirect pointer block
+				directory_inode->ind_blk_addr[indirect_block] = new_block; 
+				//printf("new_block:%d\n",new_block );
+				block_read(new_block, pointer_buffer);
+				po = (int *)pointer_buffer;
+				//allocate a new block
+				po[0] = balloc();
+				if(po[0]==ERROR){
+					//NO free blocks
+					//do i need to free new_block?
+				return ERROR;
+				}
+				block_write(new_block,pointer_buffer);
+			}
+			else{
+				//allocate a block
+				j = directory_inode->ind_blk_addr[indirect_block];
+			//	printf("insert_entry_into_dir, indirect_block addr:%d\n", j);
+				block_read(j, pointer_buffer);
+				po = (int *)pointer_buffer;
+				po[indirect_index] = balloc();
+				if(po[indirect_index] == ERROR){
+					return ERROR;
+				}
+				block_write(j,pointer_buffer);
+			}
+		}
 		directory_inode->n_blocks++;
 		// ASSERT(0);
 	}
-
+	int blk_n;
 	char data_buffer[BLOCK_SIZE];
-	block_read(directory_inode->dir_blk_addr[which_block],data_buffer); //read this block into data_buffer
+	blk_n = find_block(directory_inode, which_block);
+	//printf("haha:%d\n",blk_n );
+	block_read(blk_n, data_buffer); //read this block into data_buffer
 	dir_t * dir_struct_ptr;
 	dir_struct_ptr = (dir_t *)data_buffer;
 	dir_struct_ptr[which_entry].inode = source_inode_number;
@@ -214,9 +270,9 @@ int insert_entry_into_dir(int source_inode_number,int dest_inode_number,char *fi
 		//in other words, only support MAX_FILE_NAME-1 chars
 		return ERROR;
 	}
-	strcpy(dir_struct_ptr[which_entry].name, file_name);
-	block_write(directory_inode->dir_blk_addr[which_block],data_buffer);//write back
 
+	strcpy(dir_struct_ptr[which_entry].name, file_name);
+	block_write(blk_n, data_buffer);//write back
 	directory_inode->file_size += sizeof(dir_t);
 	inode_write(dest_inode_number,inode_buffer);
 //	find_file_inode_in_dir(dest_inode_number,file_name);
@@ -245,10 +301,14 @@ int find_file_inode_in_dir(int directory_inode,char *file_name){
 	
 	int i,j;
 	dir_t * dir_struct_ptr;
+	int temp;
 	char data_buffer[BLOCK_SIZE];
-	for(i = 0;i <= how_many_blocks; i++)
-	{
-		block_read(inode_ptr->dir_blk_addr[i],data_buffer);
+	for(i = 0;i < how_many_blocks|| i==how_many_blocks &&last_entry_last_block!=0; i++)
+	{//TODO
+		temp = find_block(inode_ptr,i);
+	//	printf("current_entries:%d, how_many_blocks:%d, i:%d, temp:%d\n",current_entries,how_many_blocks, i,temp );
+		block_read(temp,data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[i],data_buffer);
 		dir_struct_ptr = (dir_t *)data_buffer;
 		if(i == how_many_blocks )
 		{
@@ -321,8 +381,18 @@ void inode_free(int inode_number){
 	char inode_buffer[BLOCK_SIZE];
 	inode = inode_read(inode_number,inode_buffer);
 	int i;
+	int temp;
 	for(i = 0; i < inode->n_blocks; i++){
-		block_free(inode->dir_blk_addr[i]);
+		//free all data blocks
+		temp = find_block(inode,i);
+		block_free(temp);
+	}
+	for(i = N_DIRECT_BLOCK; i < inode->n_blocks; i++){
+		//then free the pointer blocks
+		if((i - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK == 0){
+			temp = (i - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+			block_free(inode->ind_blk_addr[temp]);
+		}
 	}
 	inode->type = FREE_INODE;
 	inode->file_size = 0;
@@ -564,9 +634,12 @@ fs_read( int fd, char *buf, int count) {
 	int i;
 	int j;
 	int k;
+	int temp;
 	if(ti - si == 0){
 		//start and end within 1 block
-		block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		temp = find_block(inode_ptr, si);
+		block_read(temp, data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[si],data_buffer);
 		i = 0;
 		while(i < tj - sj){
 			//copy from data_buffer into buf
@@ -578,13 +651,16 @@ fs_read( int fd, char *buf, int count) {
 	else if(ti - si == 1){
 		//start with a block
 		//end with the next block
-		block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		temp = find_block(inode_ptr, si);
+		block_read(temp, data_buffer);
 		i = 0;
 		while(i < BLOCK_SIZE - sj){
 			buf[i] = data_buffer[i+sj];
 			i++;
 		}
-		block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
+		temp = find_block(inode_ptr, ti);
+		block_read(temp, data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
 		j = 0;
 		while(j < tj){
 		   buf[i++] = data_buffer[j++];
@@ -593,7 +669,9 @@ fs_read( int fd, char *buf, int count) {
 	}
 	else{
 		//start with last few bytes
-		block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		temp = find_block(inode_ptr, si);
+		block_read(temp, data_buffer);
 		i = 0;
 		while(i < BLOCK_SIZE - sj){
 			buf[i] = data_buffer[i+sj];
@@ -602,14 +680,18 @@ fs_read( int fd, char *buf, int count) {
 		//then continue copying whole blocks
 		//2,3,...n-1
 		for(j = si + 1; j < ti; j++){
-			block_read(inode_ptr->dir_blk_addr[j],data_buffer);
+			temp = find_block(inode_ptr, j);
+			block_read(temp, data_buffer);
+			//block_read(inode_ptr->dir_blk_addr[j],data_buffer);
 			k = 0;
 			while(k<BLOCK_SIZE){
 				buf[i++] = data_buffer[k++];
 			}
 		}
 		//end with block n
-		block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
+		temp = find_block(inode_ptr, ti);
+		block_read(temp, data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
 		j = 0;
 		while(j < tj){
 		   buf[i++] = data_buffer[j++];
@@ -655,114 +737,204 @@ fs_write( int fd, char *buf, int count) {
 //		ERROR_MSG(("negative count\n"))
 		return ERROR;
 	}
-/*	if(offset + count >= inode_ptr->file_size){
-		//write range out of the file
-		//need to change inode info: file size, blocks,...
-		//allocate more blocks
-		inode_ptr->file_size = offset + count;
-		int new_block_number;
-		new_block_number = inode_ptr->file_size / BLOCK_SIZE;
-		while(inode_ptr->n_blocks < new_block_number){
-			int new_block;
-			new_block = balloc();
-			if(new_block == ERROR){
-				ERROR_MSG(("NO free blocks"))
+	//printf("offset : %d \n",offset );
+	int si;//start block
+	si = offset / BLOCK_SIZE;
+	int sj;//start in-block-addr
+	sj = offset % BLOCK_SIZE;
+	int ti;//end block
+	ti = (offset + count -1) / BLOCK_SIZE;
+	int tj;//end in-block-addr
+	tj = (offset + count -1) % BLOCK_SIZE;
+	if(ti >= MAX_FILE_SIZE)
+	{
+		return ERROR;
+	}
+	char data_buffer[BLOCK_SIZE];
+	int i;
+	int j;
+	int k;
+	char pointer_buffer[BLOCK_SIZE];
+	int * po;
+	if(si + 1 > inode_ptr->n_blocks || ti + 1 > inode_ptr->n_blocks){
+		//need to alloc more blocks
+		i = ( (si+1)>inode_ptr->n_blocks? si:inode_ptr->n_blocks);
+		for(; i<=ti; i++){
+			j = balloc();
+			if(j == ERROR){
 				return ERROR;
 			}
-			inode_ptr->dir_blk_addr[inode_ptr->n_blocks] = new_block;
-			inode_ptr->n_blocks++;
-		}
-		inode_write(inode_number, inode_buffer);
-	}*/
-		int si;//start block
-		si = offset / BLOCK_SIZE;
-		int sj;//start in-block-addr
-		sj = offset % BLOCK_SIZE;
-		int ti;//end block
-		ti = (offset + count) / BLOCK_SIZE;
-		int tj;//end in-block-addr
-		tj = (offset + count) % BLOCK_SIZE;
-		char data_buffer[BLOCK_SIZE];
-		int i;
-		int j;
-		int k;
-		if(si + 1 > inode_ptr->n_blocks){
-			//need to alloc more blocks
-			for(i=si; i<=ti; i++){
-				j = balloc();
-				if(j == ERROR){
-	//				ERROR_MSG(("no free blocks\n"))
+			if(i > N_DIRECT_BLOCK - 1){
+			//NEED TO USE INDIRECT BLOCK
+			//if it is first time when an indirect block is not setup
+			int indirect_block;
+			int indirect_index;
+			indirect_block = (i - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+			indirect_index = (i - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
+			if(indirect_block >= N_INDIRECT_BLOCK){//too large
+/*				printf("should not reach here\n");*/
+				return ERROR;
+			}
+			if(indirect_index == 0){
+				//use j as  an indirect pointer block
+				inode_ptr->ind_blk_addr[indirect_block] = j;
+				block_read(j,pointer_buffer);
+				po = (int *)pointer_buffer;
+				//allocate a new block
+				po[0] = balloc();
+				if(po[0]==ERROR){
+					//NO free blocks
+					//do i need to free j?
+				return ERROR;
+				}
+				block_write(j,pointer_buffer);
+			}
+			else{
+				//allocate a block
+				j = inode_ptr->ind_blk_addr[indirect_block];
+				block_read(j, pointer_buffer);
+				po = (int *)pointer_buffer;
+				po[indirect_index] = balloc();
+				if(po[indirect_index] == ERROR){
 					return ERROR;
 				}
-				inode_ptr->dir_blk_addr[i] = j;
+				block_write(j,pointer_buffer);
 			}
-			inode_ptr->n_blocks = ti + 1;
+			}
+			else{
+			inode_ptr->dir_blk_addr[i] = j;	
+			}				
+		}	
+		inode_ptr->n_blocks = ti + 1;
+	}
+	inode_ptr->file_size = (offset + count > inode_ptr->file_size)? offset + count : inode_ptr->file_size;
+	inode_write(inode_number, inode_buffer);
+	int temp;
+	if(ti - si == 0){
+		//start and end within 1 block
+		j = find_block(inode_ptr,si);
+		//block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		block_read(j,data_buffer);
+		i = 0;
+		while(i <= tj - sj){
+			//copy from data_buffer into buf
+			data_buffer[i+sj] = buf[i]; 
+			i++;
 		}
-		inode_ptr->file_size = (offset + count > inode_ptr->file_size)? offset + count : inode_ptr->file_size;
-		inode_write(inode_number, inode_buffer);
-		if(ti - si == 0){
-			//start and end within 1 block
-			block_read(inode_ptr->dir_blk_addr[si],data_buffer);
-			i = 0;
-			while(i < tj - sj){
-				//copy from data_buffer into buf
-				data_buffer[i+sj] = buf[i]; 
-				i++;
-			}
-			block_write(inode_ptr->dir_blk_addr[si],data_buffer);
+		//block_write(inode_ptr->dir_blk_addr[si],data_buffer);
+		block_write(j,data_buffer);
+	}
+	else if(ti - si == 1){
+		//start with a block
+		//end with the next block
+		j = find_block(inode_ptr, si);
+		block_read(j,data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		i = 0;
+		while(i < BLOCK_SIZE - sj){
+			data_buffer[i+sj] = buf[i]; 
+			i++;
 		}
-		else if(ti - si == 1){
-			//start with a block
-			//end with the next block
-			block_read(inode_ptr->dir_blk_addr[si],data_buffer);
-			i = 0;
-			while(i < BLOCK_SIZE - sj){
-				data_buffer[i+sj] = buf[i]; 
-				i++;
-			}
-			block_write(inode_ptr->dir_blk_addr[si],data_buffer);  
-					  
-			block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
-			j = 0;
-			while(j < tj){
-				 data_buffer[j++] = buf[i++];
-			}
-			block_write(inode_ptr->dir_blk_addr[ti],data_buffer);
+		//block_write(inode_ptr->dir_blk_addr[si],data_buffer);  
+		block_write(j,data_buffer);	
+		k = find_block(inode_ptr, ti);
+		block_read(k,data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
+		j = 0;
+		while(j <= tj){
+			 data_buffer[j++] = buf[i++];
 		}
-		else{
-			//start with last few bytes
-			block_read(inode_ptr->dir_blk_addr[si],data_buffer);
-			i = 0;
-			while(i < BLOCK_SIZE - sj){
-				data_buffer[i+sj] = buf[i];
-				i++;
-			}
-			block_write(inode_ptr->dir_blk_addr[si],data_buffer);
-			//then continue copying whole blocks
-			//2,3,...n-1
-			for(j = si + 1; j < ti; j++){
-				block_read(inode_ptr->dir_blk_addr[j],data_buffer);
-				k = 0;
-				while(k<BLOCK_SIZE){
-					data_buffer[k++] = buf[i++];
-				}
-				block_write(inode_ptr->dir_blk_addr[j],data_buffer);
-			}
-			//end with block n
-			block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
-			j = 0;
-			while(j < tj){
-			   data_buffer[j++] = buf[i++];
-			}
-			block_write(inode_ptr->dir_blk_addr[ti],data_buffer);       
+		block_write(k,data_buffer);
+		//block_write(inode_ptr->dir_blk_addr[ti],data_buffer);
+	}
+	else{
+		//start with last few bytes
+		j = find_block(inode_ptr,si);
+		block_read(j,data_buffer);
+		//block_read(inode_ptr->dir_blk_addr[si],data_buffer);
+		i = 0;
+		while(i < BLOCK_SIZE - sj){
+			data_buffer[i+sj] = buf[i];
+			i++;
 		}
-		file_d_table[fd].offset += count;
-		return count;    
+		block_write(j,data_buffer);
+		//block_write(inode_ptr->dir_blk_addr[si],data_buffer);
+		//then continue copying whole blocks
+		//2,3,...n-1
+		for(j = si + 1; j < ti; j++){
+			temp = find_block(inode_ptr,j);
+			block_read(temp,data_buffer);
+			//block_read(inode_ptr->dir_blk_addr[j],data_buffer);
+			k = 0;
+			while(k < BLOCK_SIZE){
+				data_buffer[k++] = buf[i++];
+			}
+			block_write(temp,data_buffer);
+		}
+		//end with block n
+		temp = find_block(inode_ptr,ti);
+		block_read(temp,data_buffer);		
+		//block_read(inode_ptr->dir_blk_addr[ti],data_buffer);
+		j = 0;
+		while(j <= tj){
+		   data_buffer[j++] = buf[i++];
+		}
+		block_write(temp,data_buffer);       
+	}
+	file_d_table[fd].offset += count;
+	return count;    
 }
+int find_block(inode_t * ino, int ord){
+	//ord -> the ord + 1 th block in inode
+	if(ino->n_blocks <= ord)//offset out of current blocks
+		return ERROR;
+	if(ord < N_DIRECT_BLOCK)
+		return ino->dir_blk_addr[ord];
+	int i,j;
+	char buf[BLOCK_SIZE];
+	i = (ord - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+	j = (ord - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
+	block_read(ino->ind_blk_addr[i],buf);
+	int *po;
+	po = (int *)buf;
+	int block_num;
+	block_num = po[j];
+	if(block_num<0||block_num>FS_SIZE-1)
+	{
+		printf("j=%d,block_num=%d\n",j,block_num );
+	}
+	return block_num;
+}
+/*
+The fs_lseek() function repositions the offset of the open file 
+associated with the file descriptor fd to the argument offset.
 
+The fs_lseek() function allows the file offset to be set beyond
+the end of file (but this does not change the size of the file).
+If data is later written at this offset, the file is padded 
+with '\0's in the intervening space.
+
+Upon successful completion, fs_lseek() returns the resulting 
+offset location as measured in bytes from the beginning of the 
+file.  Otherwise, a value of -1 is returned.
+ */
 int 
 fs_lseek( int fd, int offset) {
 	//start from 0-th byte of file
+	inode_t * ino;
+	char inode_buffer[BLOCK_SIZE];
+	if(fd<0||fd>=MAX_FD_NUM)
+		return ERROR;
+	if(file_d_table[fd].used == FALSE)
+		return ERROR;
+	ino = inode_read(file_d_table[fd].inode_number,inode_buffer);
+	int max_len;
+	if(ino->file_size <= offset){
+		printf("TODO\n");
+		return ERROR;
+	}
+	if(offset<0)
+		return ERROR;
 	file_d_table[fd].offset = offset;
 	return offset;
 	//return -1;
@@ -846,7 +1018,6 @@ fs_rmdir( char *fileName) {
 int remove_inode(int work_dir,int inode_number){
 	//given a directory and the inode entry user wants to remove
 	//remove this entry
-	//and then free the inode
 	inode_t * parent_inode;
 	char parent_buffer[BLOCK_SIZE];
 	parent_inode = inode_read(work_dir,parent_buffer);
@@ -858,8 +1029,12 @@ int remove_inode(int work_dir,int inode_number){
 	dir_t * entry;
 	char entry_buffer2[BLOCK_SIZE];
 	dir_t * entry2;
+	int temp;
+	int temp2;
 	for(i=0;i<parent_inode->n_blocks;i++){
-		block_read(parent_inode->dir_blk_addr[i],entry_buffer);
+		temp = find_block(parent_inode,i);
+		/*block_read(parent_inode->dir_blk_addr[i],entry_buffer);*/
+		block_read(temp,entry_buffer);
 		entry = (dir_t *)entry_buffer;
 		if(i==parent_inode->n_blocks - 1){
 			//last block
@@ -868,22 +1043,30 @@ int remove_inode(int work_dir,int inode_number){
 					if(j == offset - 1){
 						//if it is exactly the last entry
 						//then just remove it
-						bzero((char *)entry + j,sizeof(entry[j]));
+						/*bzero((char *)(entry + j),sizeof(entry[j]));*/
 						parent_inode->file_size -= sizeof(entry[j]);
 						if(parent_inode->file_size / BLOCK_SIZE < parent_inode->n_blocks){
 							//need to free a data block
 							parent_inode->n_blocks--;
-							block_free(parent_inode->dir_blk_addr[parent_inode->n_blocks]);
-							parent_inode->dir_blk_addr[parent_inode->n_blocks] = 0;
+							/*block_free(parent_inode->dir_blk_addr[parent_inode->n_blocks]);*/
+							block_free(temp);
+							if(parent_inode->n_blocks > N_DIRECT_BLOCK && ((parent_inode->n_blocks - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK == 0)){
+								//if just removed the last block that an indirect pointer points to
+								//need to free the last indirect pointer block
+								temp = (parent_inode->n_blocks - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK - 1;//-1 is for fitting into the disgusting C array subscript
+								block_free(parent_inode->ind_blk_addr[temp]);
+							}
+							/*parent_inode->dir_blk_addr[parent_inode->n_blocks] = 0;*/
 						}
 					}
 					else{
 						//overwrite this entry with the last entry
 						entry[j].inode = entry[offset - 1].inode;
 						strcpy(entry[j].name, entry[offset - 1].name);
-						bzero((char *)entry + offset - 1,sizeof(entry[offset - 1]));
+						/*bzero((char *)(entry + offset - 1),sizeof(entry[offset - 1]));*/
 						//wrtie into the last block the new entries
-						block_write(parent_inode->dir_blk_addr[i],entry_buffer);  
+						/*block_write(parent_inode->dir_blk_addr[i],entry_buffer);  */
+						block_write(temp,entry_buffer);  
 						parent_inode->file_size -= sizeof(entry[offset - 1]);
 					}
 					inode_write(work_dir, parent_buffer);
@@ -897,7 +1080,9 @@ int remove_inode(int work_dir,int inode_number){
 				if(entry[j].inode == inode_number){
 					//need to overwrite this entry with the last entry
 					//read the last block
-					block_read(parent_inode->dir_blk_addr[parent_inode->n_blocks-1],entry_buffer2);
+					temp2 = find_block(parent_inode, parent_inode->n_blocks-1);
+					/*block_read(parent_inode->dir_blk_addr[parent_inode->n_blocks-1],entry_buffer2);*/
+					block_read(temp2,entry_buffer2);
 					entry2 = (dir_t *)entry_buffer2;
 					entry[j].inode = entry2[offset - 1].inode;
 					strcpy(entry[j].name, entry2[offset - 1].name);
@@ -905,10 +1090,18 @@ int remove_inode(int work_dir,int inode_number){
 					if(parent_inode->file_size / BLOCK_SIZE < parent_inode->n_blocks){
 							//need to free a data block
 							parent_inode->n_blocks--;
-							block_free(parent_inode->dir_blk_addr[parent_inode->n_blocks]);
-							parent_inode->dir_blk_addr[parent_inode->n_blocks] = 0;
+							/*block_free(parent_inode->dir_blk_addr[parent_inode->n_blocks]);*/
+							block_free(temp2);
+							if(parent_inode->n_blocks > N_DIRECT_BLOCK && ((parent_inode->n_blocks - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK == 0)){
+								//if just removed the last block that an indirect pointer points to
+								//need to free the last indirect pointer block
+								temp2 = (parent_inode->n_blocks - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK - 1;//-1 is for fitting into the disgusting C array subscript
+								block_free(parent_inode->ind_blk_addr[temp2]);
+							}
+							/*parent_inode->dir_blk_addr[parent_inode->n_blocks] = 0;*/
 					}
-					block_write(parent_inode->dir_blk_addr[i],entry_buffer);  
+					/*block_write(parent_inode->dir_blk_addr[i],entry_buffer);  */
+					block_write(temp,entry_buffer);  
 					inode_write(work_dir, parent_buffer);
 					return 0;
 				}
@@ -978,9 +1171,7 @@ fs_link( char *old_fileName, char *new_fileName) {
 		return ERROR;
 	inode = inode_read(inode_number,block);
 	inode->link_count++;
-//	printf("inode number:%d\n",inode_number );
 	inode_write(inode_number, block);
-//	printf("%d counts\n",(((inode_t *)block)+inode_number)->link_count );
 //	ERROR_MSG(("Successfully linked, new file name %s\n",new_fileName))
 //	ERROR_MSG(("Inode No         : %d\nType             : %d\nLink Count       : 2\nSize             : 0\nBlocks allocated : 0\ndescriptor count : 1",inode_number,inode->type,inode->link_count,inode->file_size,inode->n_blocks,inode->descriptor_count))
 //	find_file_inode_in_dir(work_dir,new_fileName);
@@ -1024,7 +1215,6 @@ fs_stat( char *fileName, fileStat *buf) {
 	int inode_number;
 	inode_number = find_file_inode_in_dir(work_dir,fileName);
 	if(inode_number == ERROR){
-//		printf("file name %s not found in inode %d\n",fileName,work_dir);
 		return ERROR;
 	}
 	else{

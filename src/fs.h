@@ -6,6 +6,7 @@
 
 //number of sectors 
 #define FS_SIZE 2048
+
 #define N_INDIRECT_BLOCK 3
 #define N_DIRECT_BLOCK 9
 #define SUPER_BLOCK_SIZE sizeof(sb_t)
