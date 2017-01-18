@@ -1357,7 +1357,7 @@ fs_mkdir( char *fileName) {
 		work_dir = temp_dir;
 		return ERROR;
 	}*/
-	work_dir = result;
+	work_dir = temp_dir;
 	return 0;
 }
 /*
@@ -1618,6 +1618,7 @@ fs_link( char *old_fileName, char *new_fileName) {
 	if(inode_number!=ERROR)//file name already exists
 	{
 //		ERROR_MSG(("file name %s already exists\n",new_fileName))
+/*		printf("%s,%s\n",new_fileName,old_fileName );*/
 		return ERROR;
 	}
 	inode_number = find_file_inode_in_dir(work_dir,old_fileName);
@@ -1650,6 +1651,8 @@ On success, zero is returned.  On error, -1 is returned.  It is an error to use 
 int 
 fs_unlink( char *fileName) {
 	int inode_number;
+	if(strcmp(fileName,".")==0||strcmp(fileName,"..")==0)
+		return ERROR;
 	inode_number = find_file_inode_in_dir(work_dir,fileName);
 	if(inode_number == ERROR)
 		return ERROR;
