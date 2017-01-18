@@ -16,7 +16,7 @@
 #define SUPER_LOC 0
 #define SUPER_COPY_LOC FS_SIZE - 1
 #define MAX_INODES 256
-#define MAX_FILE_SIZE (N_INDIRECT_BLOCK*POINTERS_PER_BLOCK+N_DIRECT_BLOCK)
+#define MAX_FILE_SIZE (N_INDIRECT_BLOCK*POINTERS_PER_BLOCK+N_DIRECT_BLOCK)//in blocks
 
 
 #define FS_SIZE_IN_BYTES (FS_SIZE*SECTOR_SIZE)//2048*512
@@ -363,8 +363,9 @@ int insert_entry_into_dir(int source_inode_number,int dest_inode_number,char *fi
 	char inode_buffer[BLOCK_SIZE]; 
 	directory_inode = inode_read(dest_inode_number,inode_buffer);
 	//must be a directory, or it cannot contain any files
-	if(directory_inode->type!=DIRECTORY)
+	if(directory_inode->type!=DIRECTORY){
 		return ERROR;
+	}
 	int current_entries;
 	current_entries = directory_inode->file_size / sizeof(dir_t);
 
@@ -804,7 +805,10 @@ fs_open( char *fileName, int flags) {
 	int open_inode_number;
 	/*open_inode_number = find_file_inode_in_dir(work_dir,fileName);*/
 	char t[MAX_FILE_NAME];
+	int temp_dir;
+	temp_dir = work_dir;
 	open_inode_number = path_lookup(fileName,3,t);
+	work_dir = temp_dir;
 	if(open_inode_number==-3){
 		return ERROR;
 	}
@@ -857,6 +861,8 @@ fs_open( char *fileName, int flags) {
 */
 int 
 fs_close( int fd) {
+	if(fd<0||fd>=MAX_FD_NUM)
+		return ERROR;
 	if(file_d_table[fd].used == FALSE)
 		return ERROR;
 	inode_t * inode;
@@ -1021,25 +1027,98 @@ fs_write( int fd, char *buf, int count) {
 //		ERROR_MSG(("negative count\n"))
 		return ERROR;
 	}
-	//printf("offset : %d \n",offset );
 	int si;//start block
-	si = offset / BLOCK_SIZE;
 	int sj;//start in-block-addr
-	sj = offset % BLOCK_SIZE;
 	int ti;//end block
-	ti = (offset + count -1) / BLOCK_SIZE;
 	int tj;//end in-block-addr
-	tj = (offset + count -1) % BLOCK_SIZE;
-	if(ti >= MAX_FILE_SIZE)
-	{
-		return ERROR;
-	}
+	//printf("offset : %d \n",offset );
 	char data_buffer[BLOCK_SIZE];
 	int i;
 	int j;
 	int k;
 	char pointer_buffer[BLOCK_SIZE];
 	int * po;
+	int indirect_block;
+	int indirect_index;
+	char padding[BLOCK_SIZE];
+	if(inode_ptr->file_size <= offset){
+		//0 padding
+
+		si = inode_ptr->file_size / BLOCK_SIZE;
+
+		sj = inode_ptr->file_size % BLOCK_SIZE;
+		
+		ti = (offset ) / BLOCK_SIZE ;
+		
+		tj = (offset ) % BLOCK_SIZE ;
+		if(ti >= MAX_FILE_SIZE)
+		{
+			return ERROR;
+		}
+		if(tj==0&&ti!=0)
+			ti--;
+		bzero_block(padding);
+		if(si>=inode_ptr->n_blocks)
+			i = si;
+		else
+			i = si+1;
+		for(; i<=ti; i++){
+			j = balloc();
+			if(j == ERROR){
+				return ERROR;
+			}
+			if(i > N_DIRECT_BLOCK - 1){
+				//NEED TO USE INDIRECT BLOCK
+				//if it is first time when an indirect block is not setup
+				indirect_block = (i - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+				indirect_index = (i - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
+				if(indirect_block >= N_INDIRECT_BLOCK){//too large
+			//printf("should not reach here\n");*/
+					block_free(j);
+					return ERROR;
+				}
+				if(indirect_index == 0){
+					//use j as  an indirect pointer block
+					inode_ptr->ind_blk_addr[indirect_block] = j;
+					block_read(j,pointer_buffer);
+					po = (int *)pointer_buffer;
+					//allocate a new block
+					po[0] = balloc();
+					block_write(po[0],padding);
+					if(po[0]==ERROR){
+						block_free(j);
+						return ERROR;
+					}
+
+					block_write(j,pointer_buffer);
+				}
+				else{
+					//allocate a block
+					k = inode_ptr->ind_blk_addr[indirect_block];
+					block_read(k, pointer_buffer);
+					po = (int *)pointer_buffer;
+					po[indirect_index] = j;
+					block_write(j,padding);
+					block_write(j,pointer_buffer);
+				}
+			}
+			else{
+				block_write(j,padding);
+				inode_ptr->dir_blk_addr[i] = j;	
+			}				
+		}	
+		inode_ptr->n_blocks = ti + 1;
+		inode_ptr->file_size = offset ;
+		inode_write(inode_number, inode_buffer);		
+	}
+	si = offset / BLOCK_SIZE;
+	sj = offset % BLOCK_SIZE;
+	ti = (offset + count -1) / BLOCK_SIZE;
+	tj = (offset + count -1) % BLOCK_SIZE;
+	if(ti >= MAX_FILE_SIZE)
+	{
+		return ERROR;
+	}
 	if(si + 1 > inode_ptr->n_blocks || ti + 1 > inode_ptr->n_blocks){
 		//need to alloc more blocks
 		i = ( (si+1)>inode_ptr->n_blocks? si:inode_ptr->n_blocks);
@@ -1049,44 +1128,40 @@ fs_write( int fd, char *buf, int count) {
 				return ERROR;
 			}
 			if(i > N_DIRECT_BLOCK - 1){
-			//NEED TO USE INDIRECT BLOCK
-			//if it is first time when an indirect block is not setup
-			int indirect_block;
-			int indirect_index;
-			indirect_block = (i - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
-			indirect_index = (i - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
-			if(indirect_block >= N_INDIRECT_BLOCK){//too large
-/*				printf("should not reach here\n");*/
-				return ERROR;
-			}
-			if(indirect_index == 0){
-				//use j as  an indirect pointer block
-				inode_ptr->ind_blk_addr[indirect_block] = j;
-				block_read(j,pointer_buffer);
-				po = (int *)pointer_buffer;
-				//allocate a new block
-				po[0] = balloc();
-				if(po[0]==ERROR){
-					//NO free blocks
-					//do i need to free j?
-				return ERROR;
-				}
-				block_write(j,pointer_buffer);
-			}
-			else{
-				//allocate a block
-				j = inode_ptr->ind_blk_addr[indirect_block];
-				block_read(j, pointer_buffer);
-				po = (int *)pointer_buffer;
-				po[indirect_index] = balloc();
-				if(po[indirect_index] == ERROR){
+				//NEED TO USE INDIRECT BLOCK
+				//if it is first time when an indirect block is not setup
+				indirect_block = (i - N_DIRECT_BLOCK) / POINTERS_PER_BLOCK;
+				indirect_index = (i - N_DIRECT_BLOCK) % POINTERS_PER_BLOCK;
+				if(indirect_block >= N_INDIRECT_BLOCK){//too large
+				//printf("should not reach here\n");*/
 					return ERROR;
 				}
-				block_write(j,pointer_buffer);
-			}
+				if(indirect_index == 0){
+					//use j as  an indirect pointer block
+					inode_ptr->ind_blk_addr[indirect_block] = j;
+					block_read(j,pointer_buffer);
+					po = (int *)pointer_buffer;
+					//allocate a new block
+					po[0] = balloc();
+					if(po[0]==ERROR){
+						//NO free blocks
+						//do i need to free j?
+						inode_free(j);
+						return ERROR;
+					}
+					block_write(j,pointer_buffer);
+				}
+				else{
+					//allocate a block
+					k = inode_ptr->ind_blk_addr[indirect_block];
+					block_read(k, pointer_buffer);
+					po = (int *)pointer_buffer;
+					po[indirect_index] = j;
+					block_write(k,pointer_buffer);
+					}
 			}
 			else{
-			inode_ptr->dir_blk_addr[i] = j;	
+				inode_ptr->dir_blk_addr[i] = j;	
 			}				
 		}	
 		inode_ptr->n_blocks = ti + 1;
@@ -1215,10 +1290,10 @@ fs_lseek( int fd, int offset) {
 	int max_len;
 	if(offset<0)
 		return ERROR;
-	if(ino->file_size <= offset){
+/*	if(ino->file_size <= offset){
 		printf("TODO\n");
 		return ERROR;
-	}
+	}*/
 	file_d_table[fd].offset = offset;
 	return offset;
 	//return -1;
